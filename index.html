@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Glass Sky — Stage 1: The Glass Box</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#2b2320;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#fff}
+  canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+  .pill{position:fixed;top:12px;padding:7px 12px;border-radius:999px;background:rgba(30,22,18,.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);font-size:14px;font-weight:600;border:1px solid rgba(255,255,255,.18)}
+  #faith{left:12px}
+  #gear{right:12px;cursor:pointer;font-size:16px;line-height:1;padding:7px 10px}
+  #panel{position:fixed;top:56px;right:12px;width:min(270px,calc(100vw - 24px));padding:14px;border-radius:14px;background:rgba(30,22,18,.82);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.15);font-size:13px;display:none}
+  #panel.open{display:block}
+  #panel label{display:block;margin:0 0 10px}
+  #panel .row{display:flex;justify-content:space-between;margin-bottom:4px}
+  #panel input[type=range]{width:100%}
+  #panel .chk{display:flex;align-items:center;gap:8px}
+  #panel button{width:100%;margin-top:4px;padding:8px;border-radius:8px;border:0;background:#e9d6a6;color:#3a2a1c;font-weight:600;font-size:13px}
+  #panel .mode{opacity:.7;margin-top:10px;font-size:12px}
+  #hint{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);max-width:86vw;text-align:center;padding:9px 14px;border-radius:12px;background:rgba(30,22,18,.6);font-size:14px;transition:opacity .8s;opacity:0;pointer-events:none}
+  #start{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;background:rgba(25,18,14,.45);text-align:center}
+  #start h1{margin:0;font-size:40px;letter-spacing:.5px;text-shadow:0 2px 12px rgba(0,0,0,.4)}
+  #start p{margin:0 0 14px;opacity:.85}
+  #start button{padding:14px 28px;border-radius:999px;border:0;background:#fff3d6;color:#3a2a1c;font-size:17px;font-weight:700;box-shadow:0 6px 24px rgba(0,0,0,.3)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="faith" class="pill">✦ 0</div>
+<div id="gear" class="pill" role="button" aria-label="Settings">⚙</div>
+<div id="panel">
+  <label><div class="row"><span>Box depth</span><span id="vDepth"></span></div><input id="depth" type="range" min="0.15" max="1" step="0.01"></label>
+  <label><div class="row"><span>Tilt strength</span><span id="vStrength"></span></div><input id="strength" type="range" min="0.3" max="2" step="0.05"></label>
+  <label><div class="row"><span>Glass shine</span><span id="vShine"></span></div><input id="shine" type="range" min="0" max="1.5" step="0.05"></label>
+  <label class="chk"><input id="invert" type="checkbox"> Invert tilt direction</label>
+  <button id="recenter">Recenter tilt</button>
+  <div class="mode" id="modeLabel"></div>
+</div>
+<div id="hint"></div>
+<div id="start">
+  <h1>Glass Sky</h1>
+  <p>Stage 1 · the glass box</p>
+  <button id="go">Tap to begin</button>
+</div>
+
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const S = { depth: 0.55, strength: 1, shine: 0.7, invert: false };
+let W, H, DPR, D, EH, hw, hh;
+let scene = null, mode = 'idle', faith = 0;
+const eye = { x: 0, y: 0, tx: 0, ty: 0 };
+const ripples = [], sparks = [];
+
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function rng(seed) { return () => { seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+function shade(hex, f) { const n = parseInt(hex.slice(1), 16); const r = clamp(((n >> 16) & 255) * f, 0, 255) | 0, g = clamp(((n >> 8) & 255) * f, 0, 255) | 0, b = clamp((n & 255) * f, 0, 255) | 0; return `rgb(${r},${g},${b})`; }
+function mix(a, b, k) { const A = parseInt(a.slice(1), 16), B = parseInt(b.slice(1), 16); const c = s => Math.round(((A >> s) & 255) * (1 - k) + ((B >> s) & 255) * k); return `rgb(${c(16)},${c(8)},${c(0)})`; }
+
+// ---------- projection: eye above the glass looking straight down ----------
+const tz = z => EH / (EH + z);
+function setZ(z) { const t = tz(z); ctx.setTransform(DPR * t, 0, 0, DPR * t, DPR * (W / 2 + eye.x * (1 - t)), DPR * (H / 2 + eye.y * (1 - t))); return t; }
+function proj(x, y, z) { const t = tz(z); return [W / 2 + eye.x * (1 - t) + x * t, H / 2 + eye.y * (1 - t) + y * t]; }
+function screen() { ctx.setTransform(DPR, 0, 0, DPR, 0, 0); }
+const maxOff = () => 0.32 * W * S.strength;
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  hw = W / 2; hh = H / 2;
+  EH = 0.9 * Math.max(W, H);
+  D = S.depth * W;
+  build();
+}
+
+// ---------- scene ----------
+function perimPoint(s, a, b) {
+  let t = s * 4 * (a + b);
+  if (t < 2 * a) return [-a + t, -b]; t -= 2 * a;
+  if (t < 2 * b) return [a, -b + t]; t -= 2 * b;
+  if (t < 2 * a) return [a - t, b]; t -= 2 * a;
+  return [-a, b - t];
+}
+// direction from a point toward the middle of the clearing
+function inward(x, y) { const cy = clamp(y, -(hh - hw), hh - hw), dx = -x, dy = cy - y, l = Math.hypot(dx, dy) || 1; return [dx / l, dy / l]; }
+function makeClumps(R, n, r, spread) { const c = []; for (let i = 0; i < n; i++) { const a = R() * 6.28, d = i === 0 ? 0 : (0.3 + R() * spread) * r; c.push({ x: Math.cos(a) * d, y: Math.sin(a) * d, r: (0.38 + R() * 0.25) * r }); } return c; }
+
+function build() {
+  const R = rng(7), u = W;
+  const pond = { x: -0.1 * u, y: -0.07 * H, rx: 0.14 * u, ry: 0.095 * u };
+  const temple = { x: 0, y: 0.25 * H, s: 0.2 * u };
+  const path = [[0, 0.25 * H], [0.1 * u, 0.1 * H], [0.06 * u, -0.06 * H], [0.16 * u, -0.25 * H], [0.06 * u, -0.5 * H]];
+  const greens = [['#1f4a2a', '#4a8c42'], ['#244f2b', '#5a9a46'], ['#1d4630', '#46905a'], ['#2c5526', '#6aa245']];
+
+  // outer ring: tall trees whose crowns press against the glass
+  const edge = [], inner = [], branches = [], bushes = [], hang = [], vines = [];
+  const perim = 4 * (hw + hh);
+  let s = 0;
+  while (s < 1) {
+    const d = u * (-0.01 + R() * 0.04), [x, y] = perimPoint(s, hw - d, hh - d), r = u * (0.09 + R() * 0.05);
+    edge.push({ x, y, r, col: greens[(R() * 4) | 0], clumps: makeClumps(R, 7, r, 0.55), zb: 0.4 + R() * 0.15 });
+    s += (u * (0.08 + R() * 0.05)) / perim;
+  }
+  // middle ring: shorter trees standing at the forest's edge
+  s = R() * 0.02;
+  while (s < 1) {
+    const d = u * (0.09 + R() * 0.1), [x, y] = perimPoint(s, hw - d, hh - d), r = u * (0.045 + R() * 0.05);
+    inner.push({ x, y, r, col: greens[(R() * 4) | 0], clumps: makeClumps(R, 6, r, 0.5), zt: 0.18 + R() * 0.3 });
+    s += (u * (0.08 + R() * 0.1)) / perim;
+  }
+  // branches reaching into the clearing at many heights
+  for (const t of edge) {
+    const n = R() < 0.75 ? 1 + (R() < 0.4) : 0;
+    for (let k = 0; k < n; k++) {
+      const [ix, iy] = inward(t.x, t.y), a = Math.atan2(iy, ix) + (R() - .5) * 1.1, len = u * (0.12 + R() * 0.14), zf = 0.08 + R() * 0.5;
+      const tip = { x: t.x + Math.cos(a) * len, y: t.y + Math.sin(a) * len };
+      const mid = { x: t.x + Math.cos(a) * len * 0.55 + (R() - .5) * 10, y: t.y + Math.sin(a) * len * 0.55 + (R() - .5) * 10 };
+      branches.push({ x: t.x, y: t.y, mid, tip, zf, droop: 0.04 + R() * 0.06, col: greens[(R() * 4) | 0], clumps: makeClumps(R, 4, u * (0.035 + R() * 0.02), 0.6), seed: R() * 6 });
+    }
+  }
+  // undergrowth along the forest floor
+  s = 0;
+  while (s < 1) {
+    const d = u * (0.12 + R() * 0.16), [x, y] = perimPoint(s, hw - d, hh - d);
+    bushes.push({ x, y, r: u * (0.018 + R() * 0.03), col: ['#4f8f45', '#5f9e48', '#6aa84f', '#3f7f3c'][(R() * 4) | 0] });
+    s += (u * (0.06 + R() * 0.1)) / perim;
+  }
+  // vines hanging from the canopy, and vines creeping across the glass
+  for (let k = 0; k < 7; k++) { const t = edge[(R() * edge.length) | 0], [ix, iy] = inward(t.x, t.y); hang.push({ x: t.x + ix * t.r * 0.6, y: t.y + iy * t.r * 0.6, ix, iy, len: 0.25 + R() * 0.35, seed: R() * 6 }); }
+  for (let k = 0; k < 6; k++) {
+    const t = edge[(R() * edge.length) | 0], [ix, iy] = inward(t.x, t.y);
+    let x = t.x + ix * t.r * 0.7 + hw, y = t.y + iy * t.r * 0.7 + hh, a = Math.atan2(iy, ix) + (R() - .5) * 0.8;
+    const pts = [[x, y]]; const n = 8 + ((R() * 8) | 0);
+    for (let i = 0; i < n; i++) { a += (R() - .5) * 0.7; x += Math.cos(a) * 9; y += Math.sin(a) * 9; pts.push([x, y]); }
+    vines.push(pts);
+  }
+
+  const trees = [[0.15, -0.24, 0.075, 0.55], [-0.13, 0.12, 0.065, 0.45]].map(([x, y, r, th], i) => ({ x: x * u, y: y * H, r: r * u, th, col: [['#3f7a35', '#8ccf5c'], ['#4a8540', '#9ad66a']][i] }));
+  const rocks = [[0.12, 0.05, 0.03, 0.06], [-0.05, -0.22, 0.026, 0.05], [0.14, 0.17, 0.034, 0.07]].map(([x, y, r, h]) => ({ x: x * u, y: y * H, r: r * u, h }));
+  const patches = [], tufts = [], flowers = [], litter = [], sun = [];
+  for (let i = 0; i < 12; i++) patches.push({ x: (R() - .5) * W * 0.6, y: (R() - .5) * H * 0.7, rx: (0.08 + R() * 0.1) * u, ry: (0.05 + R() * 0.07) * u, a: R() * 3 });
+  for (let i = 0; i < 70; i++) { const x = (R() - .5) * W * 0.95, y = (R() - .5) * H * 0.95; if (!inPond(pond, x, y, 1.1)) tufts.push({ x, y }); }
+  const fc = ['#ffd6e7', '#fff4c2', '#ffffff', '#ffb3c7', '#ffe08a'];
+  for (let i = 0; i < 40; i++) { const x = (R() - .5) * W * 0.65, y = (R() - .5) * H * 0.75; if (!inPond(pond, x, y, 1.1)) flowers.push({ x, y, c: fc[i % fc.length] }); }
+  for (let i = 0; i < 90; i++) { const [x, y] = perimPoint(R(), hw - u * (0.05 + R() * 0.2), hh - u * (0.05 + R() * 0.2)); litter.push({ x, y, a: R() * 6, c: ['#8a6a3a', '#a07a3e', '#6f5a2e', '#b58a46'][(R() * 4) | 0] }); }
+  for (let i = 0; i < 5; i++) sun.push({ x: (R() - .5) * W * 0.55, y: (R() - .5) * H * 0.65, r: u * (0.07 + R() * 0.07) });
+  const lilies = [[0.05, 0.02], [-0.07, -0.03], [0.02, -0.05]].map(([x, y]) => ({ x: pond.x + x * u, y: pond.y + y * u }));
+  scene = { pond, temple, path, trees, rocks, patches, tufts, flowers, litter, sun, lilies, edge, inner, branches, bushes, hang, vines, followers: [], bubbles: [],
+    smudges: [{ x: 0.7 * W, y: 0.24 * H, r: 0.09 * W }, { x: 0.28 * W, y: 0.66 * H, r: 0.07 * W }] };
+  const fcol = ['#ffb38a', '#f7d27a', '#9ed0f0', '#f5a3c0', '#b9a3f0', '#a8e0a0'];
+  for (let i = 0; i < 6; i++) { const p = randomSpot(R); scene.followers.push({ x: p[0], y: p[1], tx: p[0], ty: p[1], fx: 0, fy: 1, col: fcol[i], r: 0.033 * u, wait: R() * 2, lookUntil: 0, hopStart: -1, lift: 0, prayAt: 0 }); }
+}
+function inPond(p, x, y, k) { return ((x - p.x) / (p.rx * k)) ** 2 + ((y - p.y) / (p.ry * k)) ** 2 < 1; }
+function walkable(x, y) {
+  const s = scene, m = 0.24 * W;
+  if (Math.abs(x) > hw - m || Math.abs(y) > hh - m) return false;
+  if (inPond(s.pond, x, y, 1.2)) return false;
+  if (Math.abs(x - s.temple.x) < s.temple.s * 0.65 && Math.abs(y - s.temple.y) < s.temple.s * 0.65) return false;
+  for (const t of s.trees) if (Math.hypot(x - t.x, y - t.y) < t.r * 0.35) return false;
+  return true;
+}
+function randomSpot(R = Math.random) { for (let i = 0; i < 60; i++) { const x = (R() - .5) * W, y = (R() - .5) * H; if (walkable(x, y)) return [x, y]; } return [0, 0]; }
+
+// ---------- update ----------
+let nextPrayer = 2500;
+function update(now, dt) {
+  // tilt source
+  if (mode !== 'motion' && !drag) {
+    const m = maxOff();
+    eye.tx = Math.sin(now / 2600) * m * 0.16;
+    eye.ty = Math.cos(now / 3400) * m * 0.1;
+  }
+  const k = 1 - Math.exp(-dt * (drag ? 14 : 7));
+  eye.x += (eye.tx - eye.x) * k; eye.y += (eye.ty - eye.y) * k;
+
+  const sp = 0.07 * W;
+  for (const f of scene.followers) {
+    if (f.hopStart >= 0) { const p = (now - f.hopStart) / 480; f.lift = p >= 0 && p <= 1 ? Math.sin(Math.PI * p) * f.r * 1.8 : 0; if (p > 1) f.hopStart = -1; }
+    if (f.prayAt && now >= f.prayAt) { f.prayAt = 0; spawnPrayer(f); }
+    if (now < f.lookUntil) continue;
+    const dx = f.tx - f.x, dy = f.ty - f.y, d = Math.hypot(dx, dy);
+    if (d < 2) { f.wait -= dt; if (f.wait <= 0) { const p = randomSpot(); f.tx = p[0]; f.ty = p[1]; f.wait = 0.6 + Math.random() * 2.5; } }
+    else { const st = Math.min(d, sp * dt); const nx = f.x + dx / d * st, ny = f.y + dy / d * st; if (walkable(nx, ny)) { f.x = nx; f.y = ny; f.fx = dx / d; f.fy = dy / d; } else { const p = randomSpot(); f.tx = p[0]; f.ty = p[1]; } }
+  }
+  // occasional prayer: someone looks up, hops, sends a heart to the glass
+  nextPrayer -= dt * 1000;
+  if (nextPrayer <= 0 && mode !== 'idle') {
+    nextPrayer = 3500 + Math.random() * 4000;
+    const free = scene.followers.filter(f => now > f.lookUntil);
+    if (free.length && scene.bubbles.length < 7) { const f = free[(Math.random() * free.length) | 0]; f.lookUntil = now + 1800; f.hopStart = now + 150; f.prayAt = now + 450; }
+  }
+  for (const b of scene.bubbles) {
+    if (b.phase === 'rise') { b.z -= dt * D * 0.45; b.x += b.vx * dt; if (b.z <= 5) { b.z = 5; b.phase = 'stick'; b.t0 = now; } }
+  }
+  scene.bubbles = scene.bubbles.filter(b => !(b.phase === 'stick' && now - b.t0 > 30000));
+  for (let i = ripples.length - 1; i >= 0; i--) if (now - ripples[i].t0 > 900) ripples.splice(i, 1);
+  for (let i = sparks.length - 1; i >= 0; i--) { const s = sparks[i]; s.x += s.vx * dt; s.y += s.vy * dt; if (now - s.t0 > 600) sparks.splice(i, 1); }
+}
+function spawnPrayer(f) { scene.bubbles.push({ x: f.x, y: f.y, z: D - f.r * 2.6, vx: (Math.random() - .5) * 10, phase: 'rise', t0: 0, seed: Math.random() * 6 }); }
+
+// ---------- drawing ----------
+function heart(x, y, s) { ctx.beginPath(); ctx.moveTo(x, y + s * .45); ctx.bezierCurveTo(x - s * 1.1, y - s * .25, x - s * .5, y - s, x, y - s * .38); ctx.bezierCurveTo(x + s * .5, y - s, x + s * 1.1, y - s * .25, x, y + s * .45); ctx.fill(); }
+function disc(x, y, r) { ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+
+function drawFloor() {
+  const s = scene; setZ(D);
+  ctx.fillStyle = '#a3cc7c'; ctx.fillRect(-hw, -hh, W, H);
+  ctx.fillStyle = 'rgba(190,225,140,.45)';
+  for (const p of s.patches) { ctx.beginPath(); ctx.ellipse(p.x, p.y, p.rx, p.ry, p.a, 0, Math.PI * 2); ctx.fill(); }
+  ctx.lineCap = ctx.lineJoin = 'round';
+  const tracePath = () => { ctx.beginPath(); ctx.moveTo(s.path[0][0], s.path[0][1]); for (let i = 1; i < s.path.length - 1; i++) { const [x1, y1] = s.path[i], [x2, y2] = s.path[i + 1]; ctx.quadraticCurveTo(x1, y1, (x1 + x2) / 2, (y1 + y2) / 2); } const l = s.path[s.path.length - 1]; ctx.lineTo(l[0], l[1]); };
+  ctx.strokeStyle = '#d9c08c'; ctx.lineWidth = 0.08 * W; tracePath(); ctx.stroke();
+  ctx.strokeStyle = '#ead7a8'; ctx.lineWidth = 0.06 * W; tracePath(); ctx.stroke();
+  const p = s.pond;
+  ctx.fillStyle = '#7fae6a'; ctx.beginPath(); ctx.ellipse(p.x, p.y, p.rx * 1.08, p.ry * 1.1, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#5aa6c9'; ctx.beginPath(); ctx.ellipse(p.x, p.y, p.rx, p.ry, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#78c0dc'; ctx.beginPath(); ctx.ellipse(p.x - p.rx * .1, p.y - p.ry * .1, p.rx * .8, p.ry * .75, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.35)'; ctx.beginPath(); ctx.ellipse(p.x - p.rx * .35, p.y - p.ry * .35, p.rx * .25, p.ry * .12, -.3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#6dab4f'; for (const l of s.lilies) { ctx.beginPath(); ctx.arc(l.x, l.y, 0.02 * W, 0.4, Math.PI * 2); ctx.lineTo(l.x, l.y); ctx.fill(); }
+  ctx.strokeStyle = '#6fa04f'; ctx.lineWidth = 1.6;
+  for (const t of s.tufts) { ctx.beginPath(); ctx.moveTo(t.x - 3, t.y - 4); ctx.lineTo(t.x, t.y + 2); ctx.lineTo(t.x + 3, t.y - 4); ctx.stroke(); }
+  for (const f of s.flowers) { ctx.fillStyle = f.c; disc(f.x, f.y, 2.6); ctx.fillStyle = '#f2b84b'; disc(f.x, f.y, 1); }
+  // forest floor: deep shade under the canopy, fading into the sunny clearing
+  const g = (x0, y0, x1, y1) => { const gr = ctx.createLinearGradient(x0, y0, x1, y1); gr.addColorStop(0, 'rgba(18,34,14,.8)'); gr.addColorStop(0.55, 'rgba(18,34,14,.35)'); gr.addColorStop(1, 'rgba(18,34,14,0)'); return gr; };
+  const e = 0.34 * W;
+  ctx.fillStyle = g(0, -hh, 0, -hh + e); ctx.fillRect(-hw, -hh, W, e);
+  ctx.fillStyle = g(0, hh, 0, hh - e); ctx.fillRect(-hw, hh - e, W, e);
+  ctx.fillStyle = g(-hw, 0, -hw + e, 0); ctx.fillRect(-hw, -hh, e, H);
+  ctx.fillStyle = g(hw, 0, hw - e, 0); ctx.fillRect(hw - e, -hh, e, H);
+  for (const l of s.litter) { ctx.fillStyle = l.c; ctx.globalAlpha = 0.55; ctx.beginPath(); ctx.ellipse(l.x, l.y, 3, 1.6, l.a, 0, Math.PI * 2); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  // dappled sunlight in the clearing
+  for (const p of s.sun) { const rg = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r); rg.addColorStop(0, 'rgba(255,245,200,.22)'); rg.addColorStop(1, 'rgba(255,245,200,0)'); ctx.fillStyle = rg; disc(p.x, p.y, p.r); }
+  // shadows
+  ctx.fillStyle = 'rgba(20,40,15,.22)';
+  for (const t of s.trees) disc(t.x, t.y, t.r * 0.95);
+  for (const r of s.rocks) disc(r.x, r.y, r.r * 1.05);
+  for (const b of s.branches) for (const c of b.clumps) disc(b.tip.x + c.x, b.tip.y + c.y, c.r);
+  for (const f of s.followers) { ctx.fillStyle = `rgba(20,40,15,${0.24 - f.lift / (f.r * 20)})`; disc(f.x, f.y, f.r * (1 - f.lift / (f.r * 5))); }
+  for (const b of s.bubbles) if (b.phase === 'stick') { ctx.fillStyle = 'rgba(20,40,15,.07)'; disc(b.x, b.y, 0.05 * W); }
+}
+
+function quad(a, b, c, d, col) { ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]); ctx.lineTo(c[0], c[1]); ctx.lineTo(d[0], d[1]); ctx.closePath(); ctx.fill(); }
+function corners(x, y, w, h, z) { return [proj(x - w, y - h, z), proj(x + w, y - h, z), proj(x + w, y + h, z), proj(x - w, y + h, z)]; }
+function prism(x, y, s, zt, zb, top, side) {
+  screen();
+  const a = corners(x, y, s, s, zt), b = corners(x, y, s, s, zb);
+  quad(b[0], b[1], a[1], a[0], shade(side, 1));
+  quad(b[1], b[2], a[2], a[1], shade(side, .85));
+  quad(b[2], b[3], a[3], a[2], shade(side, .72));
+  quad(b[3], b[0], a[0], a[3], shade(side, .92));
+  setZ(zt); ctx.fillStyle = top; ctx.fillRect(x - s, y - s, s * 2, s * 2);
+}
+// all of a crown's clumps at one height, filled in one go
+function clumpLayer(x, y, clumps, sc, col) { ctx.fillStyle = col; ctx.beginPath(); for (const c of clumps) { const cx = x + c.x * sc, cy = y + c.y * sc; ctx.moveTo(cx + c.r * sc, cy); ctx.arc(cx, cy, c.r * sc, 0, Math.PI * 2); } ctx.fill(); }
+function trunk(x, y, z0, z1, r, n = 5) { for (let i = 0; i <= n; i++) { setZ(z0 + (z1 - z0) * i / n); ctx.fillStyle = shade('#6b4a2e', 0.65 + i * 0.06); disc(x, y, r); } }
+
+function collectItems(now) {
+  const s = scene, items = [];
+  // temple
+  const T = s.temple, step = D * 0.07;
+  for (let k = 0; k < 3; k++) {
+    const sz = T.s * (1 - 0.27 * k) / 2, zb = D - k * step, zt = D - (k + 1) * step;
+    items.push({ z: zt, draw: () => prism(T.x, T.y, sz, zt, zb, k === 2 ? '#efe4cf' : '#e4d6bb', '#a8916c') });
+  }
+  const bz = D - 3 * step;
+  items.push({ z: bz - D * 0.04, draw: () => {
+    for (let i = 0; i <= 4; i++) { setZ(bz - D * 0.01 * i); ctx.fillStyle = shade('#a8743f', 0.8 + i * 0.05); disc(T.x, T.y, T.s * 0.13); }
+    setZ(bz - D * 0.04); ctx.fillStyle = '#6b4424'; disc(T.x, T.y, T.s * 0.1);
+    ctx.fillStyle = '#e8584f'; disc(T.x - 4, T.y + 2, 3.2); ctx.fillStyle = '#f2c94c'; disc(T.x + 3, T.y - 2, 3); ctx.fillStyle = '#9b5de5'; disc(T.x + 1, T.y + 5, 2.6);
+  } });
+  for (const r of s.rocks) items.push({ z: D - D * r.h, draw: () => { for (let i = 0; i <= 4; i++) { const k = i / 4; setZ(D - D * r.h * k); ctx.fillStyle = shade('#a39a8c', 0.75 + 0.3 * k); disc(r.x, r.y, r.r * (1 - 0.35 * k * k)); } } });
+  // clearing trees
+  for (const t of s.trees) {
+    const th = D * t.th, zc = D - th * 0.5;
+    items.push({ z: zc, draw: () => trunk(t.x, t.y, D, D - th * 0.55, t.r * 0.17) });
+    items.push({ z: D - th, draw: () => { const n = 8; for (let i = 0; i <= n; i++) { const k = i / n; setZ(zc - th * 0.5 * k); ctx.fillStyle = mix(t.col[0], t.col[1], k); disc(t.x, t.y, t.r * (0.3 + 0.7 * Math.cos(k * Math.PI / 2))); } } });
+  }
+  // undergrowth
+  for (const b of s.bushes) items.push({ z: D - D * 0.08, draw: () => { for (let i = 0; i <= 3; i++) { const k = i / 3; setZ(D - D * 0.08 * k); ctx.fillStyle = shade(b.col, 0.75 + 0.35 * k); disc(b.x, b.y, b.r * (1 - 0.4 * k * k)); } } });
+  // middle ring of trees at the forest edge
+  for (const t of s.inner) {
+    const zt = D * t.zt, zc = zt + (D - zt) * 0.45;
+    items.push({ z: zc, draw: () => trunk(t.x, t.y, D, zc, t.r * 0.16, 4) });
+    items.push({ z: zt, draw: () => { const n = 5; for (let i = 0; i <= n; i++) { const k = i / n; setZ(zc + (zt - zc) * k); clumpLayer(t.x, t.y, t.clumps, 0.55 + 0.45 * Math.sin(k * Math.PI / 2), mix(t.col[0], t.col[1], 0.35 + 0.75 * k)); } } });
+  }
+  // branches reaching in at many heights
+  for (const b of s.branches) {
+    const z0 = D * b.zf, z1 = D * (b.zf + b.droop);
+    items.push({ z: z0, draw: () => {
+      screen();
+      const a = proj(b.x, b.y, z0), m = proj(b.mid.x, b.mid.y, (z0 + z1) / 2), c = proj(b.tip.x, b.tip.y, z1);
+      ctx.strokeStyle = '#5a3d24'; ctx.lineCap = 'round'; ctx.lineWidth = 4 * tz(z0);
+      ctx.beginPath(); ctx.moveTo(a[0], a[1]); ctx.quadraticCurveTo(m[0], m[1], c[0], c[1]); ctx.stroke();
+      const sw = Math.sin(now / 1500 + b.seed) * 1.5;
+      for (let i = 0; i <= 3; i++) { const k = i / 3; setZ(z1 - D * 0.04 * k); clumpLayer(b.tip.x + sw, b.tip.y, b.clumps, 0.7 + 0.3 * k, mix(b.col[0], b.col[1], 0.25 + 0.75 * k)); }
+      setZ((z0 + z1) / 2); clumpLayer(b.mid.x, b.mid.y, b.clumps.slice(0, 2), 0.55, mix(b.col[0], b.col[1], 0.5));
+    } });
+  }
+  // hanging vines, then the outer crowns pressed against the glass
+  items.push({ z: 0.004, draw: () => drawHangingVines(now) });
+  items.push({ z: 0.002, draw: drawCanopyRing });
+  items.push({ z: 0.001, draw: drawGlassVines });
+  for (const f of s.followers) items.push({ z: D - f.r * 2.3 - f.lift, draw: () => drawFollower(f, now) });
+  for (const b of s.bubbles) items.push({ z: b.z, draw: () => drawBubble(b, now) });
+  return items;
+}
+
+function drawCanopyRing() {
+  const E = scene.edge;
+  // lower layers of every crown first, so neighbours tuck under each other
+  for (let i = 0; i <= 3; i++) {
+    const k = i / 3;
+    for (const t of E) { setZ(D * t.zb * (1 - k)); clumpLayer(t.x, t.y, t.clumps, 0.6 + 0.4 * Math.sin(k * Math.PI / 2), mix(t.col[0], t.col[1], 0.15 + 0.6 * k)); }
+  }
+  // flattened against the glass: one bumpy outline, seams between clumps
+  setZ(0);
+  ctx.strokeStyle = 'rgba(15,40,15,.55)'; ctx.lineWidth = 1.8;
+  for (const t of E) { ctx.beginPath(); for (const c of t.clumps) { ctx.moveTo(t.x + c.x + c.r * 0.9, t.y + c.y); ctx.arc(t.x + c.x, t.y + c.y, c.r * 0.9, 0, Math.PI * 2); } ctx.stroke(); }
+  for (const t of E) clumpLayer(t.x, t.y, t.clumps, 1, mix(t.col[1], '#3f7f3c', 0.45));
+  for (const t of E) { ctx.fillStyle = 'rgba(190,235,150,.16)'; ctx.beginPath(); for (const c of t.clumps) { const cx = t.x + c.x - c.r * .15, cy = t.y + c.y - c.r * .15; ctx.moveTo(cx + c.r * .5, cy); ctx.arc(cx, cy, c.r * .5, 0, Math.PI * 2); } ctx.fill(); }
+  ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 0.8;
+  for (const t of E) for (let i = 0; i < t.clumps.length; i += 3) { const c = t.clumps[i]; ctx.beginPath(); ctx.arc(t.x + c.x, t.y + c.y, c.r * 0.8, Math.PI * 1.1, Math.PI * 1.5); ctx.stroke(); }
+}
+function pressedLeaf(x, y, a, s) {
+  ctx.save(); ctx.translate(x, y); ctx.rotate(a);
+  ctx.fillStyle = '#7cc061'; ctx.beginPath(); ctx.ellipse(0, 0, 5.5 * s, 3 * s, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = 'rgba(40,90,30,.5)'; ctx.lineWidth = 0.7; ctx.beginPath(); ctx.moveTo(-4.5 * s, 0); ctx.lineTo(4.5 * s, 0); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.4)'; ctx.beginPath(); ctx.ellipse(0, 0, 5.5 * s, 3 * s, 0, Math.PI * 1.1, Math.PI * 1.7); ctx.stroke();
+  ctx.restore();
+}
+function drawGlassVines() {
+  screen();
+  for (const v of scene.vines) {
+    ctx.strokeStyle = '#3f7a35'; ctx.lineWidth = 2; ctx.lineCap = ctx.lineJoin = 'round';
+    ctx.beginPath(); v.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke();
+    for (let i = 1; i < v.length; i += 2) {
+      const a = Math.atan2(v[i][1] - v[i - 1][1], v[i][0] - v[i - 1][0]), side = (i >> 1) % 2 ? 1 : -1;
+      pressedLeaf(v[i][0] - Math.sin(a) * 5 * side, v[i][1] + Math.cos(a) * 5 * side, a + side * 0.7, 1 - i / v.length * 0.4);
+    }
+  }
+}
+function drawHangingVines(now) {
+  screen();
+  for (const h of scene.hang) {
+    const n = 12, pts = [];
+    for (let i = 0; i <= n; i++) { const k = i / n, sw = Math.sin(now / 1100 + h.seed + k * 2) * k * 6; pts.push(proj(h.x + h.ix * (4 + k * 12) + sw, h.y + h.iy * (4 + k * 12), D * h.len * k + 2)); }
+    ctx.strokeStyle = '#2f6a2c'; ctx.lineWidth = 1.8; ctx.beginPath(); pts.forEach((q, i) => i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1])); ctx.stroke();
+    ctx.fillStyle = '#4f9440'; for (let i = 2; i <= n; i += 2) disc(pts[i][0] + (i % 4 ? 3 : -3), pts[i][1], 2.6);
+  }
+}
+
+function drawFollower(f, now) {
+  const prof = [0.72, 0.92, 1, 1, 0.94, 0.8];
+  const zf = D - f.lift, h = f.r * 2.3;
+  for (let i = 0; i < prof.length; i++) { const k = i / (prof.length - 1); setZ(zf - h * k); ctx.fillStyle = shade(f.col, 0.72 + 0.28 * k); disc(f.x, f.y, f.r * prof[i]); }
+  const t = setZ(zf - h); const r = f.r * 0.8;
+  const up = now < f.lookUntil;
+  if (up) {
+    // face turned up toward the player
+    ctx.fillStyle = '#3a2a22'; disc(f.x - r * .38, f.y - r * .05, r * .15); disc(f.x + r * .38, f.y - r * .05, r * .15);
+    ctx.fillStyle = '#fff'; disc(f.x - r * .33, f.y - r * .1, r * .05); disc(f.x + r * .43, f.y - r * .1, r * .05);
+    ctx.fillStyle = 'rgba(255,120,140,.45)'; disc(f.x - r * .62, f.y + r * .22, r * .14); disc(f.x + r * .62, f.y + r * .22, r * .14);
+    ctx.strokeStyle = '#3a2a22'; ctx.lineWidth = Math.max(1, r * .09); ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(f.x, f.y + r * .18, r * .18, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+  } else {
+    // top of the head; eyes peek over the front edge
+    const ex = f.fx, ey = f.fy, px = -ey, py = ex;
+    ctx.fillStyle = '#3a2a22';
+    disc(f.x + ex * r * .72 + px * r * .3, f.y + ey * r * .72 + py * r * .3, r * .1);
+    disc(f.x + ex * r * .72 - px * r * .3, f.y + ey * r * .72 - py * r * .3, r * .1);
+  }
+  // little sprout
+  setZ(zf - h - f.r * 0.6);
+  const sway = Math.sin(now / 300 + f.x) * 0.25;
+  ctx.fillStyle = '#5fae4a'; ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(-0.6 + sway); ctx.beginPath(); ctx.ellipse(r * .35, 0, r * .38, r * .18, 0, 0, Math.PI * 2); ctx.fill(); ctx.rotate(1.6); ctx.beginPath(); ctx.ellipse(r * .3, 0, r * .3, r * .15, 0, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+}
+
+function drawBubble(b, now) {
+  setZ(b.z);
+  if (b.phase === 'rise') {
+    const k = clamp(b.z / D, 0, 1);
+    ctx.globalAlpha = 0.95; ctx.fillStyle = '#ff7aa2'; heart(b.x, b.y, 0.03 * W * (1.1 - 0.3 * k)); ctx.globalAlpha = 1;
+  } else {
+    const w = Math.sin(now / 700 + b.seed) * 1.5, R = 0.045 * W;
+    const g = ctx.createRadialGradient(b.x - R * .3, b.y - R * .3, R * .1, b.x, b.y, R);
+    g.addColorStop(0, 'rgba(255,255,255,.55)'); g.addColorStop(.7, 'rgba(255,230,240,.18)'); g.addColorStop(1, 'rgba(255,255,255,.45)');
+    ctx.fillStyle = g; disc(b.x + w, b.y, R);
+    ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.arc(b.x + w, b.y, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = '#ff7aa2'; heart(b.x + w, b.y + R * .1, R * .45);
+  }
+}
+
+function drawGlass(now) {
+  screen();
+  const sh = S.shine;
+  if (sh > 0) {
+    const ox = -eye.x * 1.1, oy = -eye.y * 0.6;
+    const g = ctx.createLinearGradient(-W * 0.3 + ox, oy, W * 1.1 + ox, H * 0.55 + oy);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(.38, 'rgba(255,255,255,0)');
+    g.addColorStop(.44, `rgba(255,255,255,${.17 * sh})`); g.addColorStop(.48, `rgba(255,255,255,${.04 * sh})`);
+    g.addColorStop(.52, `rgba(255,255,255,${.1 * sh})`); g.addColorStop(.58, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    for (const s of scene.smudges) {
+      const rg = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
+      rg.addColorStop(0, `rgba(255,255,255,${.08 * sh})`); rg.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = rg; disc(s.x, s.y, s.r);
+      ctx.strokeStyle = `rgba(255,255,255,${.05 * sh})`; ctx.lineWidth = 1;
+      for (let k = 1; k <= 5; k++) { ctx.beginPath(); ctx.ellipse(s.x, s.y, s.r * k / 6, s.r * k / 7.5, 0.4, 0, Math.PI * 2); ctx.stroke(); }
+    }
+  }
+  // glass rim
+  const e = 16;
+  const edge = (x0, y0, x1, y1, x, y, w, h) => { const g = ctx.createLinearGradient(x0, y0, x1, y1); g.addColorStop(0, 'rgba(0,0,0,.2)'); g.addColorStop(1, 'rgba(0,0,0,0)'); ctx.fillStyle = g; ctx.fillRect(x, y, w, h); };
+  edge(0, 0, 0, e, 0, 0, W, e); edge(0, H, 0, H - e, 0, H - e, W, e); edge(0, 0, e, 0, 0, 0, e, H); edge(W, 0, W - e, 0, W - e, 0, e, H);
+  ctx.strokeStyle = 'rgba(255,255,255,.22)'; ctx.lineWidth = 1.5; ctx.strokeRect(1, 1, W - 2, H - 2);
+  // knock ripples on the glass
+  for (const r of ripples) {
+    const p = (now - r.t0) / 900;
+    for (let k = 0; k < 2; k++) { const q = p - k * 0.18; if (q <= 0) continue; ctx.strokeStyle = `rgba(255,255,255,${(1 - q) * .6})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(r.x, r.y, 10 + q * 0.18 * W, 0, Math.PI * 2); ctx.stroke(); }
+  }
+  for (const s of sparks) { const a = 1 - (now - s.t0) / 600; ctx.fillStyle = `rgba(255,236,170,${a})`; disc(s.x, s.y, 2.5 * a + .5); }
+}
+
+function render(now) {
+  screen(); ctx.clearRect(0, 0, W, H);
+  drawFloor();
+  const items = collectItems(now);
+  items.sort((a, b) => b.z - a.z);
+  for (const it of items) it.draw();
+  drawGlass(now);
+}
+
+// ---------- input ----------
+let drag = null;
+function tap(x, y) {
+  const now = performance.now();
+  // pop a prayer bubble?
+  for (let i = scene.bubbles.length - 1; i >= 0; i--) {
+    const b = scene.bubbles[i]; if (b.phase !== 'stick') continue;
+    const [bx, by] = proj(b.x, b.y, b.z);
+    if (Math.hypot(x - bx, y - by) < 0.07 * W) {
+      scene.bubbles.splice(i, 1); faith++; document.getElementById('faith').textContent = '✦ ' + faith;
+      for (let k = 0; k < 10; k++) { const a = k / 10 * Math.PI * 2; sparks.push({ x: bx, y: by, vx: Math.cos(a) * 90, vy: Math.sin(a) * 90, t0: now }); }
+      return;
+    }
+  }
+  // otherwise: knock on the glass
+  ripples.push({ x, y, t0: now });
+  const t = tz(D);
+  const wx = (x - W / 2 - eye.x * (1 - t)) / t, wy = (y - H / 2 - eye.y * (1 - t)) / t;
+  for (const f of scene.followers) {
+    const d = Math.hypot(f.x - wx, f.y - wy), delay = d / W * 550;
+    f.lookUntil = now + delay + 2300;
+    if (f.hopStart < 0) f.hopStart = now + delay;
+  }
+}
+cv.addEventListener('pointerdown', e => { drag = null; cv.setPointerCapture(e.pointerId); downAt = { x: e.clientX, y: e.clientY, moved: false }; });
+let downAt = null;
+cv.addEventListener('pointermove', e => {
+  if (!downAt) return;
+  const dx = e.clientX - downAt.x, dy = e.clientY - downAt.y;
+  if (!downAt.moved && Math.hypot(dx, dy) > 10) downAt.moved = true;
+  if (downAt.moved && mode !== 'motion') { drag = true; const m = maxOff(); eye.tx = clamp(dx * 0.9, -m, m); eye.ty = clamp(dy * 0.9, -m, m); }
+});
+const up = e => { if (downAt && !downAt.moved && mode !== 'idle') tap(e.clientX, e.clientY); downAt = null; if (drag) { drag = null; eye.tx = 0; eye.ty = 0; } };
+cv.addEventListener('pointerup', up); cv.addEventListener('pointercancel', () => { downAt = null; drag = null; });
+
+// device tilt
+let base = null;
+function onOri(e) {
+  if (e.beta == null || e.gamma == null) return;
+  if (!base) base = { b: e.beta, g: e.gamma };
+  if (mode !== 'motion') { mode = 'motion'; updateMode(); }
+  const m = maxOff(), s = S.invert ? 1 : -1;
+  eye.tx = clamp((e.gamma - base.g) / 22, -1, 1) * m * s;
+  eye.ty = clamp((e.beta - base.b) / 22, -1, 1) * m * s;
+}
+const hintEl = document.getElementById('hint'); let hintTimer;
+function hint(msg, ms = 5000) { hintEl.textContent = msg; hintEl.style.opacity = 1; clearTimeout(hintTimer); hintTimer = setTimeout(() => hintEl.style.opacity = 0, ms); }
+function updateMode() { document.getElementById('modeLabel').textContent = mode === 'motion' ? 'Using your phone’s tilt sensor.' : 'Tilt sensor unavailable here — drag to tilt.'; }
+
+document.getElementById('go').addEventListener('click', async () => {
+  document.getElementById('start').style.display = 'none';
+  mode = 'drag'; updateMode();
+  try { if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') await DeviceOrientationEvent.requestPermission(); } catch (err) {}
+  try { window.addEventListener('deviceorientation', onOri); } catch (err) {}
+  setTimeout(() => {
+    if (mode === 'motion') hint('Tilt your phone to look around the box. Tap the glass to knock.');
+    else hint('Drag the screen to tilt the box. Tap the glass to knock, tap hearts on the glass to collect them.', 7000);
+  }, 1200);
+});
+
+// settings
+const $ = id => document.getElementById(id);
+function bindRange(id, key, fmt) {
+  const el = $(id), v = $('v' + id[0].toUpperCase() + id.slice(1));
+  el.value = S[key]; v.textContent = fmt(S[key]);
+  el.addEventListener('input', () => { S[key] = parseFloat(el.value); v.textContent = fmt(S[key]); if (key === 'depth') D = S.depth * W; });
+}
+bindRange('depth', 'depth', v => Math.round(v * 100) + '%');
+bindRange('strength', 'strength', v => v.toFixed(2) + '×');
+bindRange('shine', 'shine', v => Math.round(v * 100) + '%');
+$('invert').addEventListener('change', e => S.invert = e.target.checked);
+$('recenter').addEventListener('click', () => { base = null; });
+$('gear').addEventListener('click', () => $('panel').classList.toggle('open'));
+['pointerdown', 'pointerup', 'pointermove'].forEach(t => $('panel').addEventListener(t, e => e.stopPropagation()));
+
+window.addEventListener('resize', resize);
+resize(); updateMode();
+let last = performance.now();
+function frame(now) { const dt = Math.min(0.05, (now - last) / 1000); last = now; update(now, dt); render(now); requestAnimationFrame(frame); }
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
